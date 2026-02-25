@@ -4,7 +4,7 @@ Description: 'Complete CI/CD Pipeline for ML Model on AWS'
 Parameters:
   GitHubRepo:
     Type: String
-    Default: 'your-github-username/ml-cicd-pipeline'
+    Default: 'Dhanush9945/ml-cicd-pipeline'
     Description: 'GitHub repository (username/repo)'
   
   GitHubBranch:
@@ -39,7 +39,6 @@ Resources:
   ModelBucket:
     Type: AWS::S3::Bucket
     Properties:
-      BucketName: !Sub '${AWS::StackName}-models-${AWS::AccountId}'
       VersioningConfiguration:
         Status: Enabled
 
@@ -491,6 +490,7 @@ Resources:
         - Name: Train
           Actions:
             - Name: TrainModel
+              Namespace: TrainModel
               ActionTypeId:
                 Category: Invoke
                 Owner: AWS
@@ -517,7 +517,7 @@ Resources:
                 Version: '1'
               Configuration:
                 FunctionName: !Ref DeployLambda
-                UserParameters: '#{Train.TrainModel.ModelDataUrl}'
+                UserParameters: '#{TrainModel.ModelDataUrl}'
               InputArtifacts:
                 - Name: TrainOutput
 
