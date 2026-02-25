@@ -1,0 +1,540 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: 'Complete CI/CD Pipeline for ML Model on AWS'
+
+Parameters:
+  GitHubRepo:
+    Type: String
+    Default: 'your-github-username/ml-cicd-pipeline'
+    Description: 'GitHub repository (username/repo)'
+  
+  GitHubBranch:
+    Type: String
+    Default: 'main'
+    Description: 'GitHub branch to track'
+  
+  GitHubToken:
+    Type: String
+    NoEcho: true
+    Description: 'GitHub personal access token'
+  
+  ModelName:
+    Type: String
+    Default: 'iris-classifier'
+    Description: 'Name for the ML model'
+
+Resources:
+  # S3 Bucket for artifacts
+  ArtifactBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketName: !Sub '${AWS::StackName}-artifacts-${AWS::AccountId}'
+      VersioningConfiguration:
+        Status: Enabled
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+
+  # S3 Bucket for model artifacts
+  ModelBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketName: !Sub '${AWS::StackName}-models-${AWS::AccountId}'
+      VersioningConfiguration:
+        Status: Enabled
+
+  # ECR Repository for Docker images
+  ECRRepository:
+    Type: AWS::ECR::Repository
+    Properties:
+      RepositoryName: 'ml-model-repo'
+      ImageScanningConfiguration:
+        ScanOnPush: true
+
+  # IAM Role for CodeBuild
+  CodeBuildRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: codebuild.amazonaws.com
+            Action: 'sts:AssumeRole'
+      ManagedPolicyArns:
+        - 'arn:aws:iam::aws:policy/AmazonEC2ContainerRegistryPowerUser'
+      Policies:
+        - PolicyName: CodeBuildPolicy
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - 's3:GetObject'
+                  - 's3:PutObject'
+                  - 's3:ListBucket'
+                Resource:
+                  - !GetAtt ArtifactBucket.Arn
+                  - !Sub '${ArtifactBucket.Arn}/*'
+              - Effect: Allow
+                Action:
+                  - 'logs:CreateLogGroup'
+                  - 'logs:CreateLogStream'
+                  - 'logs:PutLogEvents'
+                Resource: '*'
+
+  # CodeBuild Project
+  CodeBuildProject:
+    Type: AWS::CodeBuild::Project
+    Properties:
+      Name: !Sub '${AWS::StackName}-build'
+      ServiceRole: !GetAtt CodeBuildRole.Arn
+      Artifacts:
+        Type: CODEPIPELINE
+      Environment:
+        Type: LINUX_CONTAINER
+        ComputeType: BUILD_GENERAL1_SMALL
+        Image: aws/codebuild/standard:5.0
+        PrivilegedMode: true
+        EnvironmentVariables:
+          - Name: AWS_DEFAULT_REGION
+            Value: !Ref AWS::Region
+          - Name: AWS_ACCOUNT_ID
+            Value: !Ref AWS::AccountId
+          - Name: IMAGE_REPO_NAME
+            Value: !Ref ECRRepository
+      Source:
+        Type: CODEPIPELINE
+        BuildSpec: buildspec.yml
+
+  # IAM Role for SageMaker
+  SageMakerRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: sagemaker.amazonaws.com
+            Action: 'sts:AssumeRole'
+      ManagedPolicyArns:
+        - 'arn:aws:iam::aws:policy/AmazonSageMakerFullAccess'
+      Policies:
+        - PolicyName: SageMakerS3Access
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - 's3:GetObject'
+                  - 's3:PutObject'
+                  - 's3:ListBucket'
+                  - 's3:DeleteObject'
+                Resource:
+                  - !GetAtt ModelBucket.Arn
+                  - !Sub '${ModelBucket.Arn}/*'
+                  - !GetAtt ArtifactBucket.Arn
+                  - !Sub '${ArtifactBucket.Arn}/*'
+              - Effect: Allow
+                Action:
+                  - 'ecr:GetAuthorizationToken'
+                  - 'ecr:BatchCheckLayerAvailability'
+                  - 'ecr:GetDownloadUrlForLayer'
+                  - 'ecr:BatchGetImage'
+                Resource: '*'
+
+  # IAM Role for CodePipeline
+  CodePipelineRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: codepipeline.amazonaws.com
+            Action: 'sts:AssumeRole'
+      Policies:
+        - PolicyName: CodePipelinePolicy
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - 's3:GetObject'
+                  - 's3:PutObject'
+                  - 's3:GetBucketLocation'
+                  - 's3:ListBucket'
+                Resource:
+                  - !GetAtt ArtifactBucket.Arn
+                  - !Sub '${ArtifactBucket.Arn}/*'
+              - Effect: Allow
+                Action:
+                  - 'codebuild:BatchGetBuilds'
+                  - 'codebuild:StartBuild'
+                Resource: !GetAtt CodeBuildProject.Arn
+              - Effect: Allow
+                Action:
+                  - 'lambda:InvokeFunction'
+                Resource: !GetAtt TrainingLambda.Arn
+              - Effect: Allow
+                Action:
+                  - 'lambda:InvokeFunction'
+                Resource: !GetAtt DeployLambda.Arn
+
+  # Lambda Role
+  LambdaExecutionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: 'sts:AssumeRole'
+      ManagedPolicyArns:
+        - 'arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole'
+      Policies:
+        - PolicyName: SageMakerAccess
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - 'sagemaker:CreateTrainingJob'
+                  - 'sagemaker:DescribeTrainingJob'
+                  - 'sagemaker:CreateModel'
+                  - 'sagemaker:CreateEndpointConfig'
+                  - 'sagemaker:CreateEndpoint'
+                  - 'sagemaker:UpdateEndpoint'
+                  - 'sagemaker:DescribeEndpoint'
+                  - 'sagemaker:DescribeEndpointConfig'
+                  - 'sagemaker:DeleteEndpoint'
+                  - 'sagemaker:DeleteEndpointConfig'
+                Resource: '*'
+              - Effect: Allow
+                Action:
+                  - 'iam:PassRole'
+                Resource: !GetAtt SageMakerRole.Arn
+              - Effect: Allow
+                Action:
+                  - 'codepipeline:PutJobSuccessResult'
+                  - 'codepipeline:PutJobFailureResult'
+                Resource: '*'
+              - Effect: Allow
+                Action:
+                  - 's3:GetObject'
+                  - 's3:PutObject'
+                Resource:
+                  - !Sub '${ArtifactBucket.Arn}/*'
+                  - !Sub '${ModelBucket.Arn}/*'
+              - Effect: Allow
+                Action:
+                  - 'ecr:DescribeImages'
+                Resource: !GetAtt ECRRepository.Arn
+
+  # Lambda function for training
+  TrainingLambda:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: !Sub '${AWS::StackName}-training'
+      Runtime: python3.9
+      Handler: index.lambda_handler
+      Role: !GetAtt LambdaExecutionRole.Arn
+      Timeout: 900
+      Environment:
+        Variables:
+          SAGEMAKER_ROLE: !GetAtt SageMakerRole.Arn
+          MODEL_BUCKET: !Ref ModelBucket
+          ECR_REPO: !Sub '${AWS::AccountId}.dkr.ecr.${AWS::Region}.amazonaws.com/${ECRRepository}'
+          MODEL_NAME: !Ref ModelName
+      Code:
+        ZipFile: |
+          import json
+          import boto3
+          import time
+          import os
+          
+          sagemaker = boto3.client('sagemaker')
+          codepipeline = boto3.client('codepipeline')
+          s3 = boto3.client('s3')
+          
+          def lambda_handler(event, context):
+              job_id = event['CodePipeline.job']['id']
+              
+              try:
+                  # Get configuration
+                  sagemaker_role = os.environ['SAGEMAKER_ROLE']
+                  model_bucket = os.environ['MODEL_BUCKET']
+                  ecr_repo = os.environ['ECR_REPO']
+                  model_name = os.environ['MODEL_NAME']
+                  
+                  # Get image URI from artifacts
+                  user_params = json.loads(
+                      event['CodePipeline.job']['data']['actionConfiguration']['configuration']['UserParameters']
+                  )
+                  image_uri = user_params.get('ImageURI', f'{ecr_repo}:latest')
+                  
+                  # Create training job
+                  training_job_name = f"{model_name}-{int(time.time())}"
+                  
+                  response = sagemaker.create_training_job(
+                      TrainingJobName=training_job_name,
+                      RoleArn=sagemaker_role,
+                      AlgorithmSpecification={
+                          'TrainingImage': image_uri,
+                          'TrainingInputMode': 'File'
+                      },
+                      OutputDataConfig={
+                          'S3OutputPath': f's3://{model_bucket}/models/'
+                      },
+                      ResourceConfig={
+                          'InstanceType': 'ml.m5.large',
+                          'InstanceCount': 1,
+                          'VolumeSizeInGB': 10
+                      },
+                      StoppingCondition={
+                          'MaxRuntimeInSeconds': 3600
+                      },
+                      HyperParameters={
+                          'n-estimators': '100',
+                          'max-depth': '5'
+                      }
+                  )
+                  
+                  # Wait for training to complete
+                  while True:
+                      status = sagemaker.describe_training_job(
+                          TrainingJobName=training_job_name
+                      )['TrainingJobStatus']
+                      
+                      if status in ['Completed', 'Failed', 'Stopped']:
+                          break
+                      time.sleep(30)
+                  
+                  if status == 'Completed':
+                      # Put success result
+                      codepipeline.put_job_success_result(
+                          jobId=job_id,
+                          outputVariables={
+                              'TrainingJobName': training_job_name,
+                              'ModelDataUrl': f"s3://{model_bucket}/models/{training_job_name}/output/model.tar.gz"
+                          }
+                      )
+                      return {'statusCode': 200, 'body': 'Training completed'}
+                  else:
+                      raise Exception(f'Training failed with status: {status}')
+                      
+              except Exception as e:
+                  print(f'Error: {str(e)}')
+                  codepipeline.put_job_failure_result(
+                      jobId=job_id,
+                      failureDetails={'message': str(e), 'type': 'JobFailed'}
+                  )
+                  raise
+
+  # Lambda function for deployment
+  DeployLambda:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: !Sub '${AWS::StackName}-deploy'
+      Runtime: python3.9
+      Handler: index.lambda_handler
+      Role: !GetAtt LambdaExecutionRole.Arn
+      Timeout: 900
+      Environment:
+        Variables:
+          SAGEMAKER_ROLE: !GetAtt SageMakerRole.Arn
+          ECR_REPO: !Sub '${AWS::AccountId}.dkr.ecr.${AWS::Region}.amazonaws.com/${ECRRepository}'
+          MODEL_NAME: !Ref ModelName
+      Code:
+        ZipFile: |
+          import json
+          import boto3
+          import time
+          import os
+          
+          sagemaker = boto3.client('sagemaker')
+          codepipeline = boto3.client('codepipeline')
+          
+          def lambda_handler(event, context):
+              job_id = event['CodePipeline.job']['id']
+              
+              try:
+                  # Get configuration
+                  sagemaker_role = os.environ['SAGEMAKER_ROLE']
+                  ecr_repo = os.environ['ECR_REPO']
+                  model_name = os.environ['MODEL_NAME']
+                  
+                  # Get model data from previous step
+                  user_params = json.loads(
+                      event['CodePipeline.job']['data']['actionConfiguration']['configuration']['UserParameters']
+                  )
+                  model_data_url = user_params.get('ModelDataUrl')
+                  image_uri = user_params.get('ImageURI', f'{ecr_repo}:latest')
+                  
+                  timestamp = int(time.time())
+                  
+                  # Create model
+                  model_resource_name = f"{model_name}-{timestamp}"
+                  sagemaker.create_model(
+                      ModelName=model_resource_name,
+                      PrimaryContainer={
+                          'Image': image_uri,
+                          'ModelDataUrl': model_data_url,
+                          'Environment': {}
+                      },
+                      ExecutionRoleArn=sagemaker_role
+                  )
+                  
+                  # Create endpoint config
+                  endpoint_config_name = f"{model_name}-config-{timestamp}"
+                  sagemaker.create_endpoint_config(
+                      EndpointConfigName=endpoint_config_name,
+                      ProductionVariants=[{
+                          'VariantName': 'AllTraffic',
+                          'ModelName': model_resource_name,
+                          'InstanceType': 'ml.t2.medium',
+                          'InitialInstanceCount': 1
+                      }]
+                  )
+                  
+                  # Create or update endpoint
+                  endpoint_name = f"{model_name}-endpoint"
+                  
+                  try:
+                      # Try to update existing endpoint
+                      sagemaker.update_endpoint(
+                          EndpointName=endpoint_name,
+                          EndpointConfigName=endpoint_config_name
+                      )
+                  except sagemaker.exceptions.ClientError:
+                      # Create new endpoint if it doesn't exist
+                      sagemaker.create_endpoint(
+                          EndpointName=endpoint_name,
+                          EndpointConfigName=endpoint_config_name
+                      )
+                  
+                  # Wait for endpoint to be in service
+                  while True:
+                      status = sagemaker.describe_endpoint(
+                          EndpointName=endpoint_name
+                      )['EndpointStatus']
+                      
+                      if status == 'InService':
+                          break
+                      elif status == 'Failed':
+                          raise Exception('Endpoint creation failed')
+                      time.sleep(30)
+                  
+                  codepipeline.put_job_success_result(
+                      jobId=job_id,
+                      outputVariables={
+                          'EndpointName': endpoint_name
+                      }
+                  )
+                  
+                  return {'statusCode': 200, 'body': f'Endpoint {endpoint_name} deployed'}
+                  
+              except Exception as e:
+                  print(f'Error: {str(e)}')
+                  codepipeline.put_job_failure_result(
+                      jobId=job_id,
+                      failureDetails={'message': str(e), 'type': 'JobFailed'}
+                  )
+                  raise
+
+  # CodePipeline
+  MLPipeline:
+    Type: AWS::CodePipeline::Pipeline
+    Properties:
+      Name: !Sub '${AWS::StackName}-pipeline'
+      RoleArn: !GetAtt CodePipelineRole.Arn
+      ArtifactStore:
+        Type: S3
+        Location: !Ref ArtifactBucket
+      Stages:
+        - Name: Source
+          Actions:
+            - Name: SourceAction
+              ActionTypeId:
+                Category: Source
+                Owner: ThirdParty
+                Provider: GitHub
+                Version: '1'
+              Configuration:
+                Owner: !Select [0, !Split ['/', !Ref GitHubRepo]]
+                Repo: !Select [1, !Split ['/', !Ref GitHubRepo]]
+                Branch: !Ref GitHubBranch
+                OAuthToken: !Ref GitHubToken
+              OutputArtifacts:
+                - Name: SourceOutput
+        
+        - Name: Build
+          Actions:
+            - Name: BuildAction
+              ActionTypeId:
+                Category: Build
+                Owner: AWS
+                Provider: CodeBuild
+                Version: '1'
+              Configuration:
+                ProjectName: !Ref CodeBuildProject
+              InputArtifacts:
+                - Name: SourceOutput
+              OutputArtifacts:
+                - Name: BuildOutput
+        
+        - Name: Train
+          Actions:
+            - Name: TrainModel
+              ActionTypeId:
+                Category: Invoke
+                Owner: AWS
+                Provider: Lambda
+                Version: '1'
+              Configuration:
+                FunctionName: !Ref TrainingLambda
+                UserParameters: !Sub |
+                  {
+                    "ImageURI": "${AWS::AccountId}.dkr.ecr.${AWS::Region}.amazonaws.com/${ECRRepository}:latest"
+                  }
+              InputArtifacts:
+                - Name: BuildOutput
+              OutputArtifacts:
+                - Name: TrainOutput
+        
+        - Name: Deploy
+          Actions:
+            - Name: DeployModel
+              ActionTypeId:
+                Category: Invoke
+                Owner: AWS
+                Provider: Lambda
+                Version: '1'
+              Configuration:
+                FunctionName: !Ref DeployLambda
+                UserParameters: '#{Train.TrainModel.ModelDataUrl}'
+              InputArtifacts:
+                - Name: TrainOutput
+
+Outputs:
+  PipelineName:
+    Description: 'Name of the CodePipeline'
+    Value: !Ref MLPipeline
+  
+  ECRRepositoryURI:
+    Description: 'ECR Repository URI'
+    Value: !Sub '${AWS::AccountId}.dkr.ecr.${AWS::Region}.amazonaws.com/${ECRRepository}'
+  
+  ModelBucket:
+    Description: 'S3 bucket for model artifacts'
+    Value: !Ref ModelBucket
+  
+  EndpointName:
+    Description: 'SageMaker endpoint name'
+    Value: !Sub '${ModelName}-endpoint'
