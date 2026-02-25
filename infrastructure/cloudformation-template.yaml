@@ -291,7 +291,7 @@ Resources:
                           'S3OutputPath': f's3://{model_bucket}/models/'
                       },
                       ResourceConfig={
-                          'InstanceType': 'ml.t3.medium',
+                          'InstanceType': 'ml.t3.large',
                           'InstanceCount': 1,
                           'VolumeSizeInGB': 10
                       },
