@@ -120,24 +120,20 @@ def train_model(args):
 
 
 if __name__ == "__main__":
-    print("\n===== SCRIPT START =====")
-
     parser = argparse.ArgumentParser()
 
     # Hyperparameters
     parser.add_argument("--n-estimators", type=int, default=100)
     parser.add_argument("--max-depth", type=int, default=5)
 
-    # SageMaker specific arguments
-    parser.add_argument("--model-dir", type=str,
-                        default=os.environ.get("SM_MODEL_DIR", "./model"))
-    parser.add_argument("--train", type=str,
-                        default=os.environ.get("SM_CHANNEL_TRAIN", "./data"))
-    parser.add_argument("--output-data-dir", type=str,
-                        default=os.environ.get("SM_OUTPUT_DATA_DIR", "./output"))
+    # SageMaker arguments
+    parser.add_argument("--model-dir", type=str, default=os.environ.get("SM_MODEL_DIR", "./model"))
+    parser.add_argument("--train", type=str, default=os.environ.get("SM_CHANNEL_TRAIN", "./data"))
+    parser.add_argument("--output-data-dir", type=str, default=os.environ.get("SM_OUTPUT_DATA_DIR", "./output"))
 
-    args = parser.parse_args()
+    # ✅ Ignore unknown SageMaker arguments
+    args, unknown = parser.parse_known_args()
 
-    print("\nParsed arguments:", args)
+    print("Unknown arguments received:", unknown)
 
     train_model(args)
